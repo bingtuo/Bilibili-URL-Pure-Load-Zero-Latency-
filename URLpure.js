@@ -1,18 +1,18 @@
 // ==UserScript==
-// @name         Bilibili URL Purifier (Performance Edition)
+// @name         Bilibili URL Pure Load (Zero Latency)
 // @namespace    http://tampermonkey.net/
-// @version      1.0
-// @description  在页面加载最初期重定向至无跟踪参数的URL，拒绝“先加载后清理”，性能极致优化版。
+// @version      2.0
+// @description  不阻塞、不重定向。在页面加载的同时瞬间静默替换地址栏参数，性能损耗几乎为0。
 // @author       Sway
 // @match        *://*.bilibili.com/*
-// @run-at      document-start
-// @grant       none
+// @run-at       document-start
+// @grant        none
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // 1. 定义需要删除的参数列表 (使用 Set 实现 O(1) 查找速度)
+    // 1. 参数黑名单 (使用 Set 实现 O(1) 极速查找)
     const uselessParams = new Set([
         'buvid', 'is_story_h5', 'launch_id', 'live_from', 'mid',
         'session_id', 'timestamp', 'up_id', 'vd_source', 'from_source',
@@ -23,52 +23,40 @@
         'plat_id', 'extra_jump_from', 'subarea_rank', 'popular_rank'
     ]);
 
-    // 2. 正则匹配规则 (用于匹配 spm=, from= 等动态参数)
-    const regexPatterns = [
-        /^spm/,      // 匹配 spm_id_from, spm_id 等
-        /^from/,     // 匹配 from_source, from 等
-        /^share/,    // 匹配 share_source 等
-    ];
+    // 正则匹配 (处理 spm=, from= 等同类参数)
+    const regexPatterns = [/^spm/, /^from/, /^share/];
 
     /**
-     * 核心清理函数 (高性能版)
-     * @param {string} urlStr 需要清理的URL
-     * @returns {string|null} 返回清理后的URL，如果无需清理返回 null
+     * 核心清理函数 (纯计算，无DOM操作，微秒级耗时)
      */
     function purify(urlStr) {
         try {
             const url = new URL(urlStr, location.href);
-            // 如果没有参数，直接跳过
             if (!url.search) return null;
 
             const params = url.searchParams;
-            const keys = Array.from(params.keys()); // 获取所有 key
+            // 使用 keys() 快速遍历，避免 toString() 产生额外开销
+            const keys = Array.from(params.keys());
             let changed = false;
 
             for (const key of keys) {
-                let shouldDelete = false;
-
-                // 优化点1：Set 查找极快
+                // 优先使用 Set 查找 (最快)
                 if (uselessParams.has(key)) {
-                    shouldDelete = true;
+                    params.delete(key);
+                    changed = true;
                 } else {
-                    // 优化点2：正则循环 (大部分情况走 Set 分支，这里执行频率低)
+                    // 其次使用正则
                     for (const reg of regexPatterns) {
                         if (reg.test(key)) {
-                            shouldDelete = true;
+                            params.delete(key);
+                            changed = true;
                             break;
                         }
                     }
                 }
-
-                if (shouldDelete) {
-                    params.delete(key);
-                    changed = true;
-                }
             }
 
             if (changed) {
-                // 处理末尾多余的 ? 或者参数
                 url.search = params.toString();
                 return url.toString();
             }
@@ -79,28 +67,25 @@
     }
 
     // ==========================================
-    // 策略一：立即重定向
+    // 核心逻辑：同步静默替换
     // ==========================================
-    // 这是解决“先加载后删除”的关键。
-    // 我们在 document-start 阶段立即检测，如果发现脏URL，立刻 stop() 并 replace。
+
+    // 立即执行，此时 DOM 尚未解析，HTML 正在下载中
     const cleanUrl = purify(location.href);
     if (cleanUrl) {
-        // 停止当前文档的加载和解析，释放资源
-        window.stop();
-        // 立即替换当前 URL，不会在历史记录留下痕迹
-        location.replace(cleanUrl);
-        // 终止后续脚本执行，因为页面即将重定向
-        throw new Error("[URL Purifier] Redirecting to clean URL...");
+        // 关键点：使用 replaceState 而不是 location.replace
+        // 效果：当前页面继续加载，不会中断，但地址栏和历史记录瞬间被替换
+        // 性能：零网络开销，仅消耗微小的 CPU 时间
+        history.replaceState(history.state, '', cleanUrl);
     }
 
     // ==========================================
-    // 策略二：拦截后续跳转
+    // 拦截后续跳转
     // ==========================================
-    // 如果页面是 SPA (单页应用) 内部跳转，上面的代码不会触发，需要 Hook History API。
     const nativePushState = history.pushState;
     history.pushState = function(state, unused, url) {
         const cleaned = purify(url);
-        // 如果需要清理，传入清理后的 URL，否则原样传入
+        // 直接修改参数，传入干净的 URL
         return nativePushState.apply(this, [state, unused, cleaned || url]);
     };
 
