@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Bilibili URL Turbo Purifier
+// @name         Bilibili URL Turbo Purifier (Fixed)
 // @namespace    http://tampermonkey.net/
-// @version      4.0
-// @description  极致性能优化版。在加载初期静默替换URL，不中断网络请求，不监听DOM，零性能损耗。
+// @version      4.1
+// @description  修复历史记录Hook失效问题，确保后续跳转也能彻底清理参数。
 // @author       Sway
 // @match        *://*.bilibili.com/*
 // @run-at       document-start
@@ -12,7 +12,7 @@
 (function() {
     'use strict';
 
-    // 1. 配置黑名单 (使用 Set 实现 O(1) 查找，速度最快)
+    // 1. 配置黑名单 (Set 查找复杂度 O(1)，性能最优)
     const uselessParams = new Set([
         'buvid', 'is_story_h5', 'launch_id', 'live_from', 'mid',
         'session_id', 'timestamp', 'up_id', 'vd_source', 'from_source',
@@ -23,30 +23,28 @@
         'plat_id', 'extra_jump_from', 'subarea_rank', 'popular_rank'
     ]);
 
-    // 2. 预编译正则 (避免在循环中重复编译，提升V8引擎效率)
+    // 2. 预编译正则
     const regexPatterns = [/^spm/, /^from/, /^share/];
 
     /**
-     * 核心清理函数 (高性能实现)
-     * @param {string} urlStr
-     * @returns {string|null} 返回清理后的URL，无变化则返回null
+     * 核心清理函数
+     * @param {string} urlStr 待清理的URL
+     * @returns {string|null} 如果清理了返回新URL，否则返回 null
      */
     function purify(urlStr) {
+        if (!urlStr) return null;
         try {
             const url = new URL(urlStr, location.href);
-            // 快速跳过：如果没有参数，直接返回
             if (!url.search) return null;
 
             const params = url.searchParams;
-            // 性能点：直接遍历迭代器，不需要转数组
-            // 删除操作是原地修改，因此需要先收集要删除的键
             const keysToDelete = [];
 
+            // 收集需要删除的 Key
             for (const key of params.keys()) {
                 if (uselessParams.has(key)) {
                     keysToDelete.push(key);
                 } else {
-                    // 仅在 Set 未命中时检查正则
                     for (const reg of regexPatterns) {
                         if (reg.test(key)) {
                             keysToDelete.push(key);
@@ -58,7 +56,6 @@
 
             if (keysToDelete.length) {
                 keysToDelete.forEach(key => params.delete(key));
-                // 重新赋值 search 会自动更新 queryString
                 url.search = params.toString();
                 return url.toString();
             }
@@ -69,41 +66,34 @@
     }
 
     // ==========================================
-    // 核心逻辑：立即执行 (同步)
+    // 1. 初始化清理 (处理页面首次加载)
     // ==========================================
-
-    // 1. 清理当前页面
-    // 此时 DOM 尚未开始解析，浏览器正在建立连接或接收头部
-    const cleanUrl = purify(location.href);
-    if (cleanUrl) {
-        // 使用 replaceState 静默修改地址栏和历史记录
-        // 不会触发页面刷新，不会中断加载，视觉上无感知
-        history.replaceState(history.state, '', cleanUrl);
+    const initialClean = purify(location.href);
+    if (initialClean) {
+        history.replaceState(history.state, '', initialClean);
     }
 
     // ==========================================
-    // 拦截后续跳转
+    // 2. Hook History API (处理后续跳转)
     // ==========================================
 
-    // 2. Hook pushState (拦截路由跳转)
     const nativePushState = history.pushState;
     history.pushState = function(state, unused, url) {
-        // 仅在 url 存在时处理
-        if (url) {
-            const cleaned = purify(url);
-            if (cleaned) url = cleaned;
-        }
-        return nativePushState.apply(this, arguments);
+        // 核心修复：计算清理后的 URL
+        const cleaned = purify(url);
+        
+        // 如果清理成功，使用清理后的 URL；否则使用原 URL
+        const finalUrl = cleaned || url;
+
+        // 核心修复：使用 call 显式传递处理后的参数，不要使用 arguments
+        return nativePushState.call(this, state, unused, finalUrl);
     };
 
-    // 3. Hook replaceState (拦截路由替换)
     const nativeReplaceState = history.replaceState;
     history.replaceState = function(state, unused, url) {
-        if (url) {
-            const cleaned = purify(url);
-            if (cleaned) url = cleaned;
-        }
-        return nativeReplaceState.apply(this, arguments);
+        const cleaned = purify(url);
+        const finalUrl = cleaned || url;
+        return nativeReplaceState.call(this, state, unused, finalUrl);
     };
 
 })();
